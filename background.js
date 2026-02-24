@@ -1,5 +1,5 @@
 // GASのウェブアプリURLをここに設定
-const GAS_URL = "【ここにステップ1で控えたウェブアプリのURLを貼り付け】";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbyqYVQpYjwLeWri1nqgUetPMZwkRfeCL2E8KCxFtzdyogAqVZC3IDfvscbjWYNKFnvo/exec";
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "transfer") {
