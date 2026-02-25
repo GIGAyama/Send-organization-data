@@ -1,15 +1,121 @@
 // ▼必ず新しく発行したGASのウェブアプリURLに書き換えてください
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwbUXIgUW0cBBoeHE-E_vSJ8dLkFCOy7t9_EZbax1C5jjwfX9sPSL7AEsEaUOhwLfSe/exec";
 
+// ▼ 新規追加: インストール時のコンテキストメニュー作成
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.contextMenus.create({
+    id: "transfer_file",
+    title: "個人アカウントへ転送",
+    contexts: ["page", "link"],
+    documentUrlPatterns: ["https://docs.google.com/*", "https://drive.google.com/*"]
+  });
+});
+
+// ▼ 新規追加: コンテキストメニューがクリックされた時の処理
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === "transfer_file") {
+    // リンクを右クリックした場合はリンクURL、何もない場所ならページURL
+    const targetUrl = info.linkUrl || info.pageUrl || tab.url;
+    startTransferWithNotification(targetUrl, tab.title || "コンテキストメニューからの転送");
+  }
+});
+
+// ▼ 新規追加: 通知をクリックした時にコピー先URLを開く処理
+chrome.notifications.onClicked.addListener((notificationId) => {
+  chrome.storage.local.get(notificationId, (result) => {
+    if (result[notificationId]) {
+      chrome.tabs.create({ url: result[notificationId] });
+      chrome.storage.local.remove(notificationId); // 履歴を消去
+    }
+  });
+});
+
+// ▼ 変更: メッセージ受信処理に一括転送の分岐を追加
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "transfer") {
-    handleTransfer(request.url, request.title)
+    startTransferWithNotification(request.url, request.title)
       .then(res => sendResponse(res))
       .catch(err => sendResponse({ status: "error", message: err.toString() }));
     return true; // 非同期通信のために必須
   }
+  
+  if (request.action === "bulk_transfer") {
+    processBulkTransfer(request.urls)
+      .then(res => sendResponse({ status: "success", count: res }))
+      .catch(err => sendResponse({ status: "error", message: err.toString() }));
+    return true;
+  }
 });
 
+// ▼ 新規追加: 通知付きの単一転送ラップ関数
+async function startTransferWithNotification(url, title) {
+  try {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icon.png",
+      title: "転送開始",
+      message: `${title}\nの転送を開始しました...`
+    });
+
+    const res = await handleTransfer(url, title);
+    
+    if (res.status === "success") {
+      chrome.notifications.create({
+        type: "basic",
+        iconUrl: "icon.png",
+        title: "転送成功！",
+        message: `コピー完了: ${title}\n【ここをクリックして開く】`,
+        requireInteraction: true // ユーザーがクリックするまで残す
+      }, (notificationId) => {
+        chrome.storage.local.set({ [notificationId]: res.url });
+      });
+    } else {
+      throw new Error(res.message);
+    }
+    return res;
+  } catch (error) {
+    chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icon.png",
+      title: "転送エラー",
+      message: error.toString()
+    });
+    throw error;
+  }
+}
+
+// ▼ 新規追加: 一括転送のループ処理関数
+async function processBulkTransfer(urls) {
+  let successCount = 0;
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icon.png",
+    title: "一括転送開始",
+    message: `合計 ${urls.length} 件の転送を開始します...\n（順次処理されるため少し時間がかかります）`
+  });
+
+  // API制限を避けるため直列（順番）に処理します
+  for (const item of urls) {
+    try {
+      const res = await handleTransfer(item.url, item.title);
+      if (res.status === "success") successCount++;
+    } catch (e) {
+      console.error(`Error transferring ${item.title}:`, e);
+    }
+  }
+
+  chrome.notifications.create({
+    type: "basic",
+    iconUrl: "icon.png",
+    title: "一括転送完了",
+    message: `${urls.length} 件中 ${successCount} 件の転送に成功しました。\n個人アカウントのドライブをご確認ください。`,
+    requireInteraction: true
+  });
+  
+  return successCount;
+}
+
+// ▼ 既存の handleTransfer 関数はそのまま残します
 async function handleTransfer(url, title) {
   const match = url.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9-_]+)/);
   if (!match) throw new Error("Googleドキュメント、スプレッドシート、スライドの画面で実行してください。");
