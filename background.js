@@ -46,7 +46,7 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 // ▼ 変更: メッセージ受信処理に一括転送の分岐を追加
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "transfer") {
-    startTransferWithNotification(request.url, request.title)
+    startTransferWithNotification(request.url, request.title, request.fileId)
       .then(res => sendResponse(res))
       .catch(err => sendResponse({ status: "error", message: err.toString() }));
     return true; // 非同期通信のために必須
@@ -61,7 +61,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 });
 
 // ▼ 新規追加: 通知付きの単一転送ラップ関数
-async function startTransferWithNotification(url, title) {
+async function startTransferWithNotification(url, title, fileId) {
   try {
     chrome.notifications.create({
       type: "basic",
@@ -70,7 +70,10 @@ async function startTransferWithNotification(url, title) {
       message: `${title}\nの転送を開始しました...`
     });
 
-    const res = await handleTransfer(url, title);
+    // fileIdがある場合はURL解析を省略して直接エクスポートを試行
+    const res = fileId
+      ? await handleTransferByFileId(fileId, title)
+      : await handleTransfer(url, title);
     
     if (res.status === "success") {
       chrome.notifications.create({
