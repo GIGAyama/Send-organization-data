@@ -109,11 +109,12 @@ function getSelectedDriveFiles() {
     const links = node.querySelectorAll('a[href]');
     for (const link of links) {
       const href = link.href;
-      if (href.includes('docs.google.com') || href.includes('drive.google.com/file/')) {
+      if (href.includes('docs.google.com') || href.includes('drive.google.com/file/') || href.includes('drive.google.com/open')) {
         url = href;
         // URLからもファイルIDを抽出（data-idが無かった場合の保険）
+        // /d/ID 形式と ?id=ID 形式の両方に対応
         if (!fileId) {
-          const idMatch = href.match(/\/d\/([a-zA-Z0-9-_]+)/);
+          const idMatch = href.match(/(?:\/d\/|[?&]id=)([a-zA-Z0-9-_]+)/);
           if (idMatch) fileId = idMatch[1];
         }
         break;

@@ -151,6 +151,12 @@ async function handleTransfer(url, title) {
     return handleDriveFileTransfer(driveFileMatch[1], title);
   }
 
+  // パターン3: drive.google.com/open?id=... 形式（Driveの一覧画面でよく使われる）
+  const driveOpenMatch = url.match(/drive\.google\.com\/open\?id=([a-zA-Z0-9-_]+)/);
+  if (driveOpenMatch) {
+    return handleDriveFileTransfer(driveOpenMatch[1], title);
+  }
+
   throw new Error("対応していないファイル形式です。\nGoogleドキュメント/スプレッドシート/スライド、\nまたはドライブ上のファイル（PDF・画像等）で実行してください。");
 }
 
@@ -206,8 +212,17 @@ async function handleDriveFileTransfer(fileId, title) {
   const contentType = response.headers.get('Content-Type') || 'application/octet-stream';
   const mimeType = contentType.split(';')[0].trim();
 
-  // HTMLが返ってきた場合はダウンロードに失敗している（権限エラーやリダイレクト）
+  // HTMLが返ってきた場合、Googleネイティブファイル（Docs/Sheets/Slides）の可能性がある
+  // 各形式でのエクスポートを順に試み、成功したものを返す
   if (mimeType === 'text/html') {
+    const types = ['document', 'spreadsheets', 'presentation'];
+    for (const type of types) {
+      try {
+        return await handleGoogleDocTransfer(type, fileId, title);
+      } catch {
+        // この形式ではなかった → 次を試す
+      }
+    }
     throw new Error("ファイルをダウンロードできませんでした。ファイルへのアクセス権限があることを確認してください。");
   }
 
