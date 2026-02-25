@@ -4,10 +4,18 @@ const GAS_URL = "https://script.google.com/macros/s/AKfycbwbUXIgUW0cBBoeHE-E_vSJ
 // ▼ コンテキストメニューの作成（removeAllで既存を消してから再作成）
 function setupContextMenus() {
   chrome.contextMenus.removeAll(() => {
+    // Google系リンクを右クリックした時（任意のページで表示される）
     chrome.contextMenus.create({
-      id: "transfer_file",
+      id: "transfer_link",
       title: "個人アカウントへ転送",
-      contexts: ["page", "link"],
+      contexts: ["link"],
+      targetUrlPatterns: ["https://docs.google.com/*", "https://drive.google.com/*"]
+    });
+    // Google系ページ自体を右クリックした時（Shift+右クリック等でネイティブメニューが出た場合）
+    chrome.contextMenus.create({
+      id: "transfer_page",
+      title: "このページを個人アカウントへ転送",
+      contexts: ["page"],
       documentUrlPatterns: ["https://docs.google.com/*", "https://drive.google.com/*"]
     });
   });
@@ -16,12 +24,12 @@ function setupContextMenus() {
 chrome.runtime.onInstalled.addListener(setupContextMenus);
 chrome.runtime.onStartup.addListener(setupContextMenus);
 
-// ▼ 新規追加: コンテキストメニューがクリックされた時の処理
+// ▼ コンテキストメニューがクリックされた時の処理
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  if (info.menuItemId === "transfer_file") {
-    // リンクを右クリックした場合はリンクURL、何もない場所ならページURL
-    const targetUrl = info.linkUrl || info.pageUrl || tab.url;
-    startTransferWithNotification(targetUrl, tab.title || "コンテキストメニューからの転送");
+  if (info.menuItemId === "transfer_link") {
+    startTransferWithNotification(info.linkUrl, tab.title || "リンクからの転送");
+  } else if (info.menuItemId === "transfer_page") {
+    startTransferWithNotification(info.pageUrl || tab.url, tab.title || "ページからの転送");
   }
 });
 
@@ -302,7 +310,9 @@ async function handleDriveFileTransfer(fileId, title) {
   return await sendToGAS(payload);
 }
 
-// ▼ GASへの送信を一元管理（レスポンス検証付き）
+// ▼ GASへの送信を一元管理
+// 注意: GAS Web Appは302リダイレクトで応答を返すため、response.okチェックは使わない。
+// レスポンスをテキストで受け取ってからJSONパースすることで、エラー時の原因を可視化する。
 async function sendToGAS(payload) {
   const response = await fetch(GAS_URL, {
     method: "POST",
@@ -310,18 +320,12 @@ async function sendToGAS(payload) {
     body: JSON.stringify(payload)
   });
 
-  if (!response.ok) {
-    throw new Error(`GASサーバーエラー (HTTP ${response.status})。デプロイURLが正しいか確認してください。`);
-  }
-
-  let result;
+  const text = await response.text();
   try {
-    result = await response.json();
+    return JSON.parse(text);
   } catch {
-    throw new Error("GASからの応答を解析できませんでした。GASのデプロイURLが正しいか確認してください。");
+    throw new Error("GAS応答の解析に失敗しました: " + text.substring(0, 200));
   }
-
-  return result;
 }
 
 // ▼ MIMEタイプから拡張子を推定するヘルパー
