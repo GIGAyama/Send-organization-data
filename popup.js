@@ -58,26 +58,74 @@ document.getElementById('bulkTransferBtn').addEventListener('click', async () =>
 // ▼ 注入されてGoogleドライブの画面（DOM）から情報を抜き出す関数
 function getSelectedDriveFiles() {
   const files = [];
-  
+
+  // --- ステップ1: 選択されたアイテムを検出 ---
   // Google Drive上で選択されているアイテムは 'aria-selected="true"' が付与される
-  const selectedNodes = document.querySelectorAll('[aria-selected="true"]');
-  
+  let selectedNodes = Array.from(document.querySelectorAll('[aria-selected="true"]'));
+
+  // フォールバック: チェックボックスが選択状態のアイテムを探す
+  if (selectedNodes.length === 0) {
+    const checked = document.querySelectorAll('[role="checkbox"][aria-checked="true"]');
+    selectedNodes = Array.from(checked).map(cb =>
+      cb.closest('[data-id]') || cb.closest('[role="row"]') || cb.closest('[role="option"]')
+    ).filter(Boolean);
+  }
+
   selectedNodes.forEach(node => {
-    // 選択された要素の中にあるリンク(aタグ)を探す
-    const link = node.tagName === 'A' ? node : node.querySelector('a');
-    
-    // docs.google.com を含むリンク（スプレッドシートやドキュメント等）のみを対象とする
-    if (link && link.href && link.href.includes('docs.google.com')) {
-      let title = node.getAttribute('aria-label') || link.textContent || "無題のファイル";
-      
-      // スクリーンリーダー用の余分なテキストを除去
-      title = title.replace(/を選択しました.*/, '').trim();
-      title = title.replace(/。$/, '').trim(); 
-      
-      files.push({ url: link.href, title: title });
+    let fileId = null;
+    let title = null;
+    let url = null;
+
+    // --- ステップ2: ファイルIDを取得（最も信頼性が高い） ---
+    // data-id は自分自身 → 祖先 → 子孫 の順で探す
+    const selfOrAncestor = node.closest('[data-id]');
+    if (selfOrAncestor) {
+      fileId = selfOrAncestor.getAttribute('data-id');
+    } else {
+      const child = node.querySelector('[data-id]');
+      if (child) fileId = child.getAttribute('data-id');
+    }
+
+    // --- ステップ3: リンクからURLを探す ---
+    const links = node.querySelectorAll('a[href]');
+    for (const link of links) {
+      const href = link.href;
+      if (href.includes('docs.google.com') || href.includes('drive.google.com/file/')) {
+        url = href;
+        // URLからもファイルIDを抽出（data-idが無かった場合の保険）
+        if (!fileId) {
+          const idMatch = href.match(/\/d\/([a-zA-Z0-9-_]+)/);
+          if (idMatch) fileId = idMatch[1];
+        }
+        break;
+      }
+    }
+
+    // ファイルIDはあるがURLが無い場合、汎用DriveURLを組み立てる
+    if (fileId && !url) {
+      url = 'https://drive.google.com/file/d/' + fileId + '/view';
+    }
+
+    // --- ステップ4: タイトルを取得 ---
+    title = node.getAttribute('aria-label') || '';
+    if (!title) {
+      const tip = node.querySelector('[data-tooltip]');
+      if (tip) title = tip.getAttribute('data-tooltip');
+    }
+    if (!title) {
+      title = (node.textContent || '').trim().split('\n')[0] || '無題のファイル';
+    }
+    // スクリーンリーダー用の余分なテキストを除去
+    title = title.replace(/を選択しました.*/, '').trim();
+    title = title.replace(/。$/, '').trim();
+
+    // --- ステップ5: ファイルとして有効な場合のみ追加 ---
+    if (fileId || url) {
+      files.push({ url: url, title: title, fileId: fileId });
     }
   });
 
-  // 同じURLが複数回抽出されるのを防ぐ（重複排除）
-  return Array.from(new Map(files.map(item => [item.url, item])).values());
+  // 同じファイルが複数回抽出されるのを防ぐ（重複排除）
+  const key = item => item.fileId || item.url;
+  return Array.from(new Map(files.map(item => [key(item), item])).values());
 }
