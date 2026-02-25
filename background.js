@@ -84,35 +84,57 @@ async function startTransferWithNotification(url, title) {
   }
 }
 
-// ▼ 新規追加: 一括転送のループ処理関数
+// ▼ 一括転送のループ処理関数（進捗通知・keepalive付き）
 async function processBulkTransfer(urls) {
   let successCount = 0;
-  chrome.notifications.create({
+  const total = urls.length;
+  const PROGRESS_ID = "bulk_transfer_progress";
+
+  chrome.notifications.create(PROGRESS_ID, {
     type: "basic",
     iconUrl: "icon.png",
-    title: "一括転送開始",
-    message: `合計 ${urls.length} 件の転送を開始します...\n（順次処理されるため少し時間がかかります）`
+    title: "一括転送中",
+    message: `0/${total} 件完了（処理中...）`
   });
 
-  // API制限を避けるため直列（順番）に処理します
-  for (const item of urls) {
-    try {
-      const res = await handleTransfer(item.url, item.title);
-      if (res.status === "success") successCount++;
-    } catch (e) {
-      console.error(`Error transferring ${item.title}:`, e);
+  // Service Workerが長時間処理中に停止するのを防ぐ
+  const stopKeepAlive = startKeepAlive();
+
+  try {
+    // API制限を避けるため直列（順番）に処理します
+    for (let i = 0; i < urls.length; i++) {
+      try {
+        const res = await handleTransfer(urls[i].url, urls[i].title);
+        if (res.status === "success") successCount++;
+      } catch (e) {
+        console.error(`Error transferring ${urls[i].title}:`, e);
+      }
+      // 進捗を通知に反映
+      chrome.notifications.update(PROGRESS_ID, {
+        message: `${i + 1}/${total} 件完了（${successCount} 件成功）`
+      });
     }
+  } finally {
+    stopKeepAlive();
   }
 
+  // 進捗通知を消して完了通知に切り替え
+  chrome.notifications.clear(PROGRESS_ID);
   chrome.notifications.create({
     type: "basic",
     iconUrl: "icon.png",
     title: "一括転送完了",
-    message: `${urls.length} 件中 ${successCount} 件の転送に成功しました。\n個人アカウントのドライブをご確認ください。`,
+    message: `${total} 件中 ${successCount} 件の転送に成功しました。\n個人アカウントのドライブをご確認ください。`,
     requireInteraction: true
   });
-  
+
   return successCount;
+}
+
+// ▼ Service Workerの強制終了を防ぐ（定期的にChrome APIを呼んでタイマーをリセット）
+function startKeepAlive() {
+  const id = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
+  return () => clearInterval(id);
 }
 
 // ▼ 転送のルーター: URLパターンに応じて適切なハンドラへ振り分ける
@@ -170,13 +192,7 @@ async function handleGoogleDocTransfer(type, id, title) {
   };
 
   // 3. GASへ送信
-  const gasResponse = await fetch(GAS_URL, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain" },
-    body: JSON.stringify(payload)
-  });
-
-  return await gasResponse.json();
+  return await sendToGAS(payload);
 }
 
 // ▼ PDF・画像などDrive上の一般ファイルの転送
@@ -225,13 +241,29 @@ async function handleDriveFileTransfer(fileId, title) {
   };
 
   // 5. GASへ送信
-  const gasResponse = await fetch(GAS_URL, {
+  return await sendToGAS(payload);
+}
+
+// ▼ GASへの送信を一元管理（レスポンス検証付き）
+async function sendToGAS(payload) {
+  const response = await fetch(GAS_URL, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify(payload)
   });
 
-  return await gasResponse.json();
+  if (!response.ok) {
+    throw new Error(`GASサーバーエラー (HTTP ${response.status})。デプロイURLが正しいか確認してください。`);
+  }
+
+  let result;
+  try {
+    result = await response.json();
+  } catch {
+    throw new Error("GASからの応答を解析できませんでした。GASのデプロイURLが正しいか確認してください。");
+  }
+
+  return result;
 }
 
 // ▼ MIMEタイプから拡張子を推定するヘルパー

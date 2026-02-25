@@ -1,13 +1,25 @@
 // 1. 開いている単一ファイルの転送
 document.getElementById('transferBtn').addEventListener('click', async () => {
   const statusDiv = document.getElementById('status');
-  statusDiv.innerHTML = "処理中...<br>（ポップアップを閉じても通知でお知らせします）";
-  
+  const btn = document.getElementById('transferBtn');
+
   chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+    const tab = tabs[0];
+
+    // Google関連ページ以外では実行不可
+    if (!/docs\.google\.com|drive\.google\.com/.test(tab.url)) {
+      statusDiv.innerHTML = '<span style="color:red;">Googleドキュメント、スプレッドシート、スライド、またはGoogleドライブの画面で実行してください。</span>';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = "転送中...";
+    statusDiv.innerHTML = "処理中...<br>（ポップアップを閉じても通知でお知らせします）";
+
     chrome.runtime.sendMessage({
       action: "transfer",
-      url: tabs[0].url,
-      title: tabs[0].title
+      url: tab.url,
+      title: tab.title
     });
   });
 });
@@ -15,16 +27,19 @@ document.getElementById('transferBtn').addEventListener('click', async () => {
 // 2. Googleドライブ画面からの複数ファイル一括転送
 document.getElementById('bulkTransferBtn').addEventListener('click', async () => {
   const statusDiv = document.getElementById('status');
-  
+  const btn = document.getElementById('bulkTransferBtn');
+
   chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
     const tab = tabs[0];
-    
+
     // ドライブの画面で実行されているかチェック
     if (!tab.url.includes("drive.google.com")) {
       statusDiv.innerHTML = '<span style="color:red;">この機能は Googleドライブ の画面でのみ使用できます。</span>';
       return;
     }
 
+    btn.disabled = true;
+    btn.textContent = "読み取り中...";
     statusDiv.textContent = "選択されたファイルを読み取っています...";
 
     // ドライブの画面にスクリプトを注入して、選択中の要素を取得
@@ -33,19 +48,23 @@ document.getElementById('bulkTransferBtn').addEventListener('click', async () =>
       function: getSelectedDriveFiles
     }, (results) => {
       if (chrome.runtime.lastError) {
-        statusDiv.innerHTML = `<span style="color:red;">エラー: 画面の読み取りに失敗しました。ページをリロード（F5）して再度お試しください。</span>`;
+        btn.disabled = false;
+        btn.textContent = "選択中のファイル一括転送";
+        statusDiv.innerHTML = '<span style="color:red;">エラー: 画面の読み取りに失敗しました。ページをリロード（F5）して再度お試しください。</span>';
         return;
       }
 
-      const selectedFiles = results[0].result;
-      
+      const selectedFiles = results?.[0]?.result;
+
       if (!selectedFiles || selectedFiles.length === 0) {
+        btn.disabled = false;
+        btn.textContent = "選択中のファイル一括転送";
         statusDiv.innerHTML = '<span style="color:red;">選択されたファイルが見つかりません。転送したいファイルをクリック（複数ある場合はCtrlやShiftキーを押しながらクリック）して選択してから実行してください。</span>';
         return;
       }
 
       statusDiv.innerHTML = `<span style="color:green;">${selectedFiles.length} 件の転送を開始しました！</span><br><br>ポップアップを閉じても裏側で処理されます。完了するとデスクトップ通知でお知らせします。`;
-      
+
       // バックグラウンドへ一括転送依頼を送信
       chrome.runtime.sendMessage({
         action: "bulk_transfer",
