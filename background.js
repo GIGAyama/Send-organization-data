@@ -1,26 +1,23 @@
-// GASのウェブアプリURLをここに設定
-const GAS_URL = "https://script.google.com/macros/s/AKfycbyqYVQpYjwLeWri1nqgUetPMZwkRfeCL2E8KCxFtzdyogAqVZC3IDfvscbjWYNKFnvo/exec";
+// ▼必ず新しく発行したGASのウェブアプリURLに書き換えてください
+const GAS_URL = "https://script.google.com/macros/s/AKfycbwbUXIgUW0cBBoeHE-E_vSJ8dLkFCOy7t9_EZbax1C5jjwfX9sPSL7AEsEaUOhwLfSe/exec";
 
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "transfer") {
     handleTransfer(request.url, request.title)
       .then(res => sendResponse(res))
       .catch(err => sendResponse({ status: "error", message: err.toString() }));
-    return true; // 非同期でレスポンスを返すために必要
+    return true; // 非同期通信のために必須
   }
 });
 
 async function handleTransfer(url, title) {
-  // URLからファイルタイプとIDを抽出
   const match = url.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9-_]+)/);
   if (!match) throw new Error("Googleドキュメント、スプレッドシート、スライドの画面で実行してください。");
   
   const type = match[1];
   const id = match[2];
-  
   let exportUrl, mimeType, targetMimeType, ext;
   
-  // ファイル形式に合わせてエクスポート設定を分岐
   if (type === 'document') {
     exportUrl = `https://docs.google.com/document/d/${id}/export?format=docx`;
     mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -38,37 +35,40 @@ async function handleTransfer(url, title) {
     ext = '.pptx';
   }
 
-  // 1. 組織アカウントの権限を利用して一時エクスポート用ファイルをダウンロード
+  // 1. エクスポートファイルのダウンロード
   const response = await fetch(exportUrl);
-  if (!response.ok) throw new Error("ファイルのエクスポートに失敗しました。権限を確認してください。");
+  if (!response.ok) throw new Error("ファイルのエクスポートに失敗しました。");
   const blob = await response.blob();
   
-  // 2. BlobをBase64に変換
-  const base64data = await blobToBase64(blob);
-  
-  // 3. GASのAPIへPOST送信
+  // 2. Service Worker環境に対応した安全なBase64変換
+  const base64data = await bufferToBase64(await blob.arrayBuffer());
   const cleanTitle = title.replace(/ - Google (スプレッドシート|ドキュメント|スライド)$/, "");
   
   const payload = {
     fileName: cleanTitle + ext,
     mimeType: mimeType,
     targetMimeType: targetMimeType,
-    base64: base64data.split(',')[1] // プレフィックス(data:〜)を削除
+    base64: base64data
   };
 
+  // 3. GASへ送信
   const gasResponse = await fetch(GAS_URL, {
     method: "POST",
+    headers: { "Content-Type": "text/plain" }, // CORS回避のためtext/plainを使用
     body: JSON.stringify(payload)
   });
   
   return await gasResponse.json();
 }
 
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
-  });
+// 大容量ファイルでもスタックオーバーフローを起こさないBase64変換関数
+async function bufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, chunk);
+  }
+  return btoa(binary);
 }
