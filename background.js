@@ -6,15 +6,35 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "transfer_file",
     title: "個人アカウントへ転送",
-    contexts: ["page", "link"],
+    contexts: ["all"],
     documentUrlPatterns: ["https://docs.google.com/*", "https://drive.google.com/*"]
   });
 });
 
-// ▼ 新規追加: コンテキストメニューがクリックされた時の処理
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+// ▼ 変更: コンテキストメニューがクリックされた時の処理（複数選択対応）
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   if (info.menuItemId === "transfer_file") {
-    // リンクを右クリックした場合はリンクURL、何もない場所ならページURL
+    // ドライブの画面で実行された場合は、選択中の複数ファイルを取得を試みる
+    if (tab.url.includes("drive.google.com")) {
+      try {
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          function: getSelectedDriveFiles
+        });
+        
+        const selectedFiles = results?.[0]?.result;
+        
+        if (selectedFiles && selectedFiles.length > 0) {
+          // 複数ファイルまたは単一の選択されたファイル
+          processBulkTransfer(selectedFiles);
+          return;
+        }
+      } catch (err) {
+        console.warn("DOM抽出に失敗:", err);
+      }
+    }
+
+    // 選択されたファイルが見つからない、またはDrive以外の画面の場合は、クリックした要素からURLを取得
     const targetUrl = info.linkUrl || info.pageUrl || tab.url;
     startTransferWithNotification(targetUrl, tab.title || "コンテキストメニューからの転送");
   }
@@ -139,19 +159,39 @@ function startKeepAlive() {
 
 // ▼ 転送のルーター: URLパターンに応じて適切なハンドラへ振り分ける
 async function handleTransfer(url, title) {
+  let resolvedUrl = url;
+
+  // パターン0: URL解決 (Driveの汎用URLの場合、Docs/Sheets/Slidesの実体か判定するため)
+  const genericDriveMatch = url.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9-_]+)/);
+  if (genericDriveMatch) {
+    resolvedUrl = await resolveDriveUrl(genericDriveMatch[1]);
+  }
+
   // パターン1: Google ドキュメント / スプレッドシート / スライド
-  const googleDocMatch = url.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9-_]+)/);
+  const googleDocMatch = resolvedUrl.match(/\/(document|spreadsheets|presentation)\/d\/([a-zA-Z0-9-_]+)/);
   if (googleDocMatch) {
     return handleGoogleDocTransfer(googleDocMatch[1], googleDocMatch[2], title);
   }
 
-  // パターン2: Drive上の一般ファイル（PDF, 画像など）
-  const driveFileMatch = url.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9-_]+)/);
+  // パターン2: Drive上の一般ファイル（PDF, 画像など実バイナリ）
+  const driveFileMatch = resolvedUrl.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9-_]+)/);
   if (driveFileMatch) {
     return handleDriveFileTransfer(driveFileMatch[1], title);
   }
 
   throw new Error("対応していないファイル形式です。\nGoogleドキュメント/スプレッドシート/スライド、\nまたはドライブ上のファイル（PDF・画像等）で実行してください。");
+}
+
+// ▼ 新規追加: DriveのIDからリダイレクト先（本当のファイル種類URL）を解決する
+async function resolveDriveUrl(fileId) {
+  try {
+    const openUrl = `https://drive.google.com/open?id=${fileId}`;
+    const response = await fetch(openUrl, { method: "HEAD", redirect: "follow" });
+    return response.url; // リダイレクト後の最終URLを返す
+  } catch (err) {
+    console.warn("URL解決に失敗しました。元のURLを利用します:", err);
+    return `https://drive.google.com/file/d/${fileId}/view`;
+  }
 }
 
 // ▼ Google ドキュメント / スプレッドシート / スライド の転送
@@ -304,4 +344,69 @@ async function bufferToBase64(buffer) {
     binary += String.fromCharCode.apply(null, chunk);
   }
   return btoa(binary);
+}
+
+// ▼ 注入用関数: Googleドライブの画面（DOM）から選択されているファイル群を抽出する
+function getSelectedDriveFiles() {
+  const files = [];
+
+  let selectedNodes = Array.from(document.querySelectorAll('[aria-selected="true"]'));
+
+  if (selectedNodes.length === 0) {
+    const checked = document.querySelectorAll('[role="checkbox"][aria-checked="true"]');
+    selectedNodes = Array.from(checked).map(cb =>
+      cb.closest('[data-id]') || cb.closest('[role="row"]') || cb.closest('[role="option"]')
+    ).filter(Boolean);
+  }
+
+  // 右クリックした要素自体も含めるためのフォールバック (選択状態でなくても右クリックされた要素を救うのは困難だが可能な範囲で)
+  
+  selectedNodes.forEach(node => {
+    let fileId = null;
+    let title = null;
+    let url = null;
+
+    const selfOrAncestor = node.closest('[data-id]');
+    if (selfOrAncestor) {
+      fileId = selfOrAncestor.getAttribute('data-id');
+    } else {
+      const child = node.querySelector('[data-id]');
+      if (child) fileId = child.getAttribute('data-id');
+    }
+
+    const links = node.querySelectorAll('a[href]');
+    for (const link of links) {
+      const href = link.href;
+      if (href.includes('docs.google.com') || href.includes('drive.google.com/file/')) {
+        url = href;
+        if (!fileId) {
+          const idMatch = href.match(/\/d\/([a-zA-Z0-9-_]+)/);
+          if (idMatch) fileId = idMatch[1];
+        }
+        break;
+      }
+    }
+
+    if (fileId && !url) {
+      url = 'https://drive.google.com/file/d/' + fileId + '/view';
+    }
+
+    title = node.getAttribute('aria-label') || '';
+    if (!title) {
+      const tip = node.querySelector('[data-tooltip]');
+      if (tip) title = tip.getAttribute('data-tooltip');
+    }
+    if (!title) {
+      title = (node.textContent || '').trim().split('\n')[0] || '無題のファイル';
+    }
+    title = title.replace(/を選択しました.*/, '').trim();
+    title = title.replace(/。$/, '').trim();
+
+    if (fileId || url) {
+      files.push({ url: url || `https://drive.google.com/file/d/${fileId}/view`, title: title, fileId: fileId });
+    }
+  });
+
+  const key = item => item.fileId || item.url;
+  return Array.from(new Map(files.map(item => [key(item), item])).values());
 }
