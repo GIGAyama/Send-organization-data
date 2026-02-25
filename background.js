@@ -1,15 +1,20 @@
 // ▼必ず新しく発行したGASのウェブアプリURLに書き換えてください
 const GAS_URL = "https://script.google.com/macros/s/AKfycbwbUXIgUW0cBBoeHE-E_vSJ8dLkFCOy7t9_EZbax1C5jjwfX9sPSL7AEsEaUOhwLfSe/exec";
 
-// ▼ 新規追加: インストール時のコンテキストメニュー作成
-chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: "transfer_file",
-    title: "個人アカウントへ転送",
-    contexts: ["page", "link"],
-    documentUrlPatterns: ["https://docs.google.com/*", "https://drive.google.com/*"]
+// ▼ コンテキストメニューの作成（removeAllで既存を消してから再作成）
+function setupContextMenus() {
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: "transfer_file",
+      title: "個人アカウントへ転送",
+      contexts: ["page", "link"],
+      documentUrlPatterns: ["https://docs.google.com/*", "https://drive.google.com/*"]
+    });
   });
-});
+}
+// インストール/更新時 と Chrome起動時 の両方でメニューを確実に作成
+chrome.runtime.onInstalled.addListener(setupContextMenus);
+chrome.runtime.onStartup.addListener(setupContextMenus);
 
 // ▼ 新規追加: コンテキストメニューがクリックされた時の処理
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -100,14 +105,25 @@ async function processBulkTransfer(urls) {
   // Service Workerが長時間処理中に停止するのを防ぐ
   const stopKeepAlive = startKeepAlive();
 
+  let lastError = "";
+
   try {
     // API制限を避けるため直列（順番）に処理します
     for (let i = 0; i < urls.length; i++) {
       try {
-        const res = await handleTransfer(urls[i].url, urls[i].title);
+        let res;
+        if (urls[i].fileId) {
+          // fileIDがある場合はURLの組み立て→再パースを省略し直接転送
+          res = await handleTransferByFileId(urls[i].fileId, urls[i].title);
+        } else if (urls[i].url) {
+          res = await handleTransfer(urls[i].url, urls[i].title);
+        } else {
+          throw new Error("ファイル情報を取得できませんでした");
+        }
         if (res.status === "success") successCount++;
       } catch (e) {
         console.error(`Error transferring ${urls[i].title}:`, e);
+        lastError = e.message || e.toString();
       }
       // 進捗を通知に反映
       chrome.notifications.update(PROGRESS_ID, {
@@ -120,11 +136,15 @@ async function processBulkTransfer(urls) {
 
   // 進捗通知を消して完了通知に切り替え
   chrome.notifications.clear(PROGRESS_ID);
+  const completionMessage = successCount === total
+    ? `${total} 件すべて転送に成功しました。\n個人アカウントのドライブをご確認ください。`
+    : `${total} 件中 ${successCount} 件の転送に成功しました。`
+      + (lastError ? `\n最後のエラー: ${lastError}` : '');
   chrome.notifications.create({
     type: "basic",
     iconUrl: "icon.png",
     title: "一括転送完了",
-    message: `${total} 件中 ${successCount} 件の転送に成功しました。\n個人アカウントのドライブをご確認ください。`,
+    message: completionMessage,
     requireInteraction: true
   });
 
@@ -135,6 +155,22 @@ async function processBulkTransfer(urls) {
 function startKeepAlive() {
   const id = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20000);
   return () => clearInterval(id);
+}
+
+// ▼ ファイルIDから直接転送を試みる（一括転送用）
+// URL組み立て→再パースの迂回を避け、fileIdから直接エクスポートを試行
+async function handleTransferByFileId(fileId, title) {
+  // 1. まずGoogleネイティブファイル（Docs/Sheets/Slides）としてエクスポートを試みる
+  const types = ['document', 'spreadsheets', 'presentation'];
+  for (const type of types) {
+    try {
+      return await handleGoogleDocTransfer(type, fileId, title);
+    } catch {
+      // この形式ではなかった → 次を試す
+    }
+  }
+  // 2. Googleネイティブでなければ通常ファイル（PDF・画像等）としてダウンロード
+  return handleDriveFileTransfer(fileId, title);
 }
 
 // ▼ 転送のルーター: URLパターンに応じて適切なハンドラへ振り分ける
@@ -184,6 +220,13 @@ async function handleGoogleDocTransfer(type, id, title) {
   // 1. エクスポートファイルのダウンロード
   const response = await fetch(exportUrl);
   if (!response.ok) throw new Error("ファイルのエクスポートに失敗しました。");
+
+  // エクスポート結果の検証（HTMLが返った場合はファイル形式の不一致）
+  const responseType = (response.headers.get('Content-Type') || '').split(';')[0].trim();
+  if (responseType === 'text/html') {
+    throw new Error("エクスポート形式が不一致です。");
+  }
+
   const blob = await response.blob();
 
   // 2. Service Worker環境に対応した安全なBase64変換
